@@ -1,0 +1,21 @@
+{
+  "name": "conference-boss-submit",
+  "version": "1.0.0",
+  "description": "Submit Lambda - Creates response record and returns presigned S3 URL",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest"
+  },
+  "keywords": ["lambda", "conference", "aws"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.540.0",
+    "@aws-sdk/lib-dynamodb": "^3.540.0",
+    "@aws-sdk/client-s3": "^3.540.0",
+    "@aws-sdk/s3-request-presigner": "^3.540.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

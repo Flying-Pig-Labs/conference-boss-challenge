@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Conference Boss Challenge - Backend Infrastructure
+
+Parameters:
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+    Description: OpenAI API Key for Whisper and GPT-4.5 Turbo
+    Default: ''
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    Description: Environment name
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_NAME: !Ref ResponsesTable
+        S3_BUCKET_NAME: !Ref AudioBucket
+        ENVIRONMENT: !Ref Environment
+
+Resources:
+  # DynamoDB Table for storing responses
+  ResponsesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub conference-responses-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: response_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: session_date
+          AttributeType: S
+        - AttributeName: score
+          AttributeType: N
+      KeySchema:
+        - AttributeName: response_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: session-date-score-index
+          KeySchema:
+            - AttributeName: session_date
+              KeyType: HASH
+            - AttributeName: score
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: ConferenceBoss
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 Bucket for audio files
+  AudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub conference-boss-audio-${AWS::AccountId}-${Environment}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAudioFiles
+            Status: Enabled
+            ExpirationInDays: 90
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - POST
+              - GET
+            AllowedOrigins:
+              - '*'  # TODO: Replace with specific domain in production
+            MaxAge: 3600
+      Tags:
+        - Key: Project
+          Value: ConferenceBoss
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function: Submit Response (Get Presigned URL)
+  SubmitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub conference-boss-submit-${Environment}
+      CodeUri: functions/submit/
+      Handler: index.handler
+      Description: Creates response record and returns presigned S3 URL
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ResponsesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /submit
+            Method: post
+
+  # Lambda Function: Process Response (Transcribe + Grade)
+  ProcessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub conference-boss-process-${Environment}
+      CodeUri: functions/process/
+      Handler: index.handler
+      Description: Transcribes audio and grades response using AI
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          OPENAI_API_KEY: !Ref OpenAIApiKey
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ResponsesTable
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: '*'
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /process
+            Method: post
+
+  # Lambda Function: Get Leaderboard
+  LeaderboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub conference-boss-leaderboard-${Environment}
+      CodeUri: functions/leaderboard/
+      Handler: index.handler
+      Description: Returns sorted leaderboard from DynamoDB
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ResponsesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /leaderboard
+            Method: get
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub conference-boss-api-${Environment}
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"  # TODO: Replace with specific domain in production
+        MaxAge: "'3600'"
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
+  # CloudWatch Log Groups
+  SubmitFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/conference-boss-submit-${Environment}
+      RetentionInDays: 7
+
+  ProcessFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/conference-boss-process-${Environment}
+      RetentionInDays: 7
+
+  LeaderboardFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/conference-boss-leaderboard-${Environment}
+      RetentionInDays: 7
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref ResponsesTable
+    Export:
+      Name: !Sub ${AWS::StackName}-TableName
+
+  S3BucketName:
+    Description: S3 bucket name for audio files
+    Value: !Ref AudioBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-BucketName
+
+  SubmitFunctionArn:
+    Description: Submit Lambda function ARN
+    Value: !GetAtt SubmitFunction.Arn
+
+  ProcessFunctionArn:
+    Description: Process Lambda function ARN
+    Value: !GetAtt ProcessFunction.Arn
+
+  LeaderboardFunctionArn:
+    Description: Leaderboard Lambda function ARN
+    Value: !GetAtt LeaderboardFunction.Arn
